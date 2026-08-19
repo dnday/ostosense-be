@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+/dist
+/build
+/coverage
+/.cache
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test reports
+coverage/
+
+# Prisma
+/prisma/dev.db
+/prisma/dev.db-journal
+
+# Optional: local uploads or generated assets
+uploads/
+public/uploads/
