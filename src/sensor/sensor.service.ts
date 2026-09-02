@@ -2,15 +2,25 @@ import { Injectable } from '@nestjs/common';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 /*
- * Kalibrasi sensor → persen UI. Nilai dari simulator: capacitance_raw ~1000
- * (naik saat cairan masuk), lig_raw ~1800 (turun saat degradasi).
- * ponytail: konstanta kalibrasi kasar — tuning ulang dengan sensor fisik.
+ * Kalibrasi sensor → persen UI. Nilai default dari simulator: capacitance_raw ~1000
+ * (naik saat cairan masuk), lig_raw ~1800 (turun saat degradasi). Nilai aktual
+ * dibaca dari tabel `sensor_calibration`, diedit lewat Settings web.
  */
-const CAP_EMPTY = 1000;
-const CAP_FULL = 1600;
-const LIG_BASE = 1800;
-const LIG_DEAD = 1200;
-const HUMID_HIGH = 60; // % di atas ini = "Tinggi"
+type Calibration = {
+  cap_empty: number;
+  cap_full: number;
+  lig_base: number;
+  lig_dead: number;
+  humid_high: number;
+};
+
+const DEFAULT_CALIBRATION: Calibration = {
+  cap_empty: 1000,
+  cap_full: 1600,
+  lig_base: 1800,
+  lig_dead: 1200,
+  humid_high: 60, // % di atas ini = "Tinggi"
+};
 
 const clamp = (v: number) => Math.max(0, Math.min(100, Math.round(v)));
 
@@ -47,7 +57,7 @@ const FALLBACK: SensorSeries = {
   kelembaban: {
     labels: ['08:00', '10:00', '12:00', '14:00', '16:00', '18:00'],
     data: [34, 42, 64, 38, 44, 72],
-    threshold: HUMID_HIGH,
+    threshold: DEFAULT_CALIBRATION.humid_high,
   },
   history: [
     { time: '18:30', desc: 'Kelembaban: 45%', status: 'Normal' },
@@ -86,19 +96,30 @@ export class SensorService {
 
       if (error || !data || data.length === 0) return FALLBACK;
 
+      const calibration = await this.getCalibration();
       const logs = (data as SensorLog[]).reverse();
-      return this.transform(logs);
+      return this.transform(logs, calibration);
     } catch {
       return FALLBACK;
     }
   }
 
-  private transform(logs: SensorLog[]): SensorSeries {
+  private async getCalibration(): Promise<Calibration> {
+    const { data } = await this.supabase
+      .from('sensor_calibration')
+      .select('*')
+      .eq('id', 'default')
+      .maybeSingle();
+    return data ? { ...DEFAULT_CALIBRATION, ...data } : DEFAULT_CALIBRATION;
+  }
+
+  private transform(logs: SensorLog[], calibration: Calibration): SensorSeries {
+    const { cap_empty, cap_full, lig_base, lig_dead, humid_high } = calibration;
     const volPct = (cap: number) =>
-      clamp(((cap - CAP_EMPTY) / (CAP_FULL - CAP_EMPTY)) * 100);
+      clamp(((cap - cap_empty) / (cap_full - cap_empty)) * 100);
     const integPct = (lig: number) =>
-      clamp(((lig - LIG_DEAD) / (LIG_BASE - LIG_DEAD)) * 100);
-    const humidPct = (cap: number) => clamp(30 + (cap - CAP_EMPTY) / 8);
+      clamp(((lig - lig_dead) / (lig_base - lig_dead)) * 100);
+    const humidPct = (cap: number) => clamp(30 + (cap - cap_empty) / 8);
 
     const hhmm = (iso: string) =>
       new Date(iso).toLocaleTimeString('id-ID', {
@@ -145,7 +166,7 @@ export class SensorService {
         return {
           time: hhmm(p.timestamp),
           desc: `${label}: ${val}%`,
-          status: (kind === 0 && val > HUMID_HIGH ? 'Tinggi' : 'Normal') as
+          status: (kind === 0 && val > humid_high ? 'Tinggi' : 'Normal') as
             | 'Normal'
             | 'Tinggi',
         };
@@ -173,7 +194,7 @@ export class SensorService {
       kelembaban: {
         labels: pts.map((p) => hhmm(p.timestamp)),
         data: pts.map((p) => humidPct(p.capacitance_raw)),
-        threshold: HUMID_HIGH,
+        threshold: humid_high,
       },
       history,
     };
