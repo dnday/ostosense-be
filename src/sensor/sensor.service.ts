@@ -121,7 +121,9 @@ export class SensorService {
     // Proyeksi risiko: tren linear integritas dari sampel pertama → terakhir,
     // diteruskan 42 jam ke depan. ponytail: "AI" = ekstrapolasi linear; ganti model beneran nanti.
     const firstInteg = integPct(logs[0].lig_raw);
-    const slope = (currentInteg - firstInteg) / 7 || -6;
+    // logs.length === 1 (baru 1 baris data) bikin slope = 0, dan `0 || -6`
+    // salah nganggep itu "no data" lalu maksa proyeksi turun padahal datanya flat.
+    const slope = logs.length > 1 ? (currentInteg - firstInteg) / 7 : -6;
     const projData = Array.from({ length: 8 }, (_, i) =>
       clamp(currentInteg + slope * i),
     );

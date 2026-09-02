@@ -18,16 +18,20 @@ export class MqttService implements OnModuleInit {
   }
 
   onModuleInit() {
-    this.logger.log('Menghubungkan ke MQTT Broker (broker.hivemq.com)...');
-    
-    // 1. Hubungkan ke Broker MQTT yang sama dengan ESP32
-    this.mqttClient = mqtt.connect('mqtt://broker.hivemq.com:1883');
+    const mqttUrl = process.env.MQTT_URL || 'mqtt://127.0.0.1:1883';
+    const topic = process.env.MQTT_TOPIC || 'ostosense/sensor_data';
+    this.logger.log(`Menghubungkan ke MQTT Broker (${mqttUrl})...`);
+
+    this.mqttClient = mqtt.connect(mqttUrl);
+
+    // mqtt.js crashes the process on an unhandled 'error' event — always listen.
+    this.mqttClient.on('error', (err) => {
+      this.logger.error(`MQTT connection error: ${err.message}`);
+    });
 
     this.mqttClient.on('connect', () => {
       this.logger.log('Berhasil terhubung ke MQTT Broker!');
       
-      // 2. Subscribe (Mendengarkan) ke topik tempat ESP32 mengirim data
-      const topic = 'ostosense/sensor_data';
       this.mqttClient.subscribe(topic, (err) => {
         if (!err) {
           this.logger.log(`Telah subscribe ke topik: ${topic}`);
@@ -45,6 +49,16 @@ export class MqttService implements OnModuleInit {
         
         // Ubah teks JSON menjadi Object
         const payload = JSON.parse(payloadStr);
+
+        // Tolak payload cacat sebelum masuk DB — kalau lolos, angka NaN
+        // ini nyasar ke grafik risiko/volume di dashboard.
+        if (
+          typeof payload.capacitance_raw !== 'number' ||
+          typeof payload.lig_raw !== 'number'
+        ) {
+          this.logger.error(`Payload MQTT tidak valid, dilewati: ${payloadStr}`);
+          return;
+        }
 
         // 4. Masukkan data ke tabel sensor_logs di Supabase
         const { error } = await this.supabase
