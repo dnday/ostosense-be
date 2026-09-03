@@ -30,44 +30,25 @@ type SensorLog = {
   lig_raw: number;
 };
 
+// ponytail: tidak ada lagi field `risiko`/proyeksi 42 jam di sini — itu tugas
+// sistem klasifikasi AI (lihat OSTOSENSE-AI, tabel ai_predictions, module
+// src/ai), bukan ekstrapolasi linear lokal. Volume & kelembaban tetap di sini
+// karena itu pembacaan langsung dari sensor, bukan prediksi.
 export type SensorSeries = {
-  source: 'supabase' | 'fallback';
-  risiko: { labels: string[]; data: number[]; current: number; status: string };
+  source: 'supabase' | 'empty';
   volume: { labels: string[]; data: number[]; current: number; status: string };
   kelembaban: { labels: string[]; data: number[]; threshold: number };
   history: { time: string; desc: string; status: 'Normal' | 'Tinggi' }[];
 };
 
-// Angka mockup Figma — dipakai saat Supabase belum dikonfigurasi/kosong,
-// supaya app tetap hidup tanpa DB.
-const FALLBACK: SensorSeries = {
-  source: 'fallback',
-  risiko: {
-    labels: ['0h', '6h', '12h', '18h', '24h', '30h', '36h', '42h'],
-    data: [100, 96, 89, 82, 75, 69, 62, 55],
-    current: 62,
-    status: 'Risiko rendah',
-  },
-  volume: {
-    labels: ['08:00', '10:00', '12:00', '14:00', '16:00', '18:00'],
-    data: [15, 25, 34, 42, 48, 45],
-    current: 45,
-    status: 'Kapasitas aman',
-  },
-  kelembaban: {
-    labels: ['08:00', '10:00', '12:00', '14:00', '16:00', '18:00'],
-    data: [34, 42, 64, 38, 44, 72],
-    threshold: DEFAULT_CALIBRATION.humid_high,
-  },
-  history: [
-    { time: '18:30', desc: 'Kelembaban: 45%', status: 'Normal' },
-    { time: '18:15', desc: 'Volume: 45%', status: 'Normal' },
-    { time: '17:45', desc: 'Integritas: 62%', status: 'Normal' },
-    { time: '17:00', desc: 'Kelembaban: 72%', status: 'Tinggi' },
-    { time: '15:30', desc: 'Volume: 48%', status: 'Normal' },
-    { time: '14:00', desc: 'Kelembaban: 38%', status: 'Normal' },
-  ],
-};
+function emptySeries(threshold: number): SensorSeries {
+  return {
+    source: 'empty',
+    volume: { labels: [], data: [], current: 0, status: 'Tidak ada data' },
+    kelembaban: { labels: [], data: [], threshold },
+    history: [],
+  };
+}
 
 @Injectable()
 export class SensorService {
@@ -87,6 +68,7 @@ export class SensorService {
   }
 
   async getSeries(): Promise<SensorSeries> {
+    const calibration = await this.getCalibration();
     try {
       const { data, error } = await this.supabase
         .from('sensor_logs')
@@ -94,13 +76,13 @@ export class SensorService {
         .order('timestamp', { ascending: false })
         .limit(120);
 
-      if (error || !data || data.length === 0) return FALLBACK;
+      // Tidak ada data nyata -> keadaan kosong yang jujur, bukan angka buatan.
+      if (error || !data || data.length === 0) return emptySeries(calibration.humid_high);
 
-      const calibration = await this.getCalibration();
       const logs = (data as SensorLog[]).reverse();
       return this.transform(logs, calibration);
     } catch {
-      return FALLBACK;
+      return emptySeries(calibration.humid_high);
     }
   }
 
@@ -136,20 +118,8 @@ export class SensorService {
     const pts = pick(6);
 
     const last = logs[logs.length - 1];
-    const currentInteg = integPct(last.lig_raw);
     const currentVol = volPct(last.capacitance_raw);
 
-    // Proyeksi risiko: tren linear integritas dari sampel pertama → terakhir,
-    // diteruskan 42 jam ke depan. ponytail: "AI" = ekstrapolasi linear; ganti model beneran nanti.
-    const firstInteg = integPct(logs[0].lig_raw);
-    // logs.length === 1 (baru 1 baris data) bikin slope = 0, dan `0 || -6`
-    // salah nganggep itu "no data" lalu maksa proyeksi turun padahal datanya flat.
-    const slope = logs.length > 1 ? (currentInteg - firstInteg) / 7 : -6;
-    const projData = Array.from({ length: 8 }, (_, i) =>
-      clamp(currentInteg + slope * i),
-    );
-
-    const humidNow = humidPct(last.capacitance_raw);
     const history = pts
       .slice()
       .reverse()
@@ -162,7 +132,7 @@ export class SensorService {
               ? volPct(p.capacitance_raw)
               : integPct(p.lig_raw);
         const label =
-          kind === 0 ? 'Kelembaban' : kind === 1 ? 'Volume' : 'Integritas';
+          kind === 0 ? 'Kelembaban' : kind === 1 ? 'Volume' : 'Integritas LIG';
         return {
           time: hhmm(p.timestamp),
           desc: `${label}: ${val}%`,
@@ -174,17 +144,6 @@ export class SensorService {
 
     return {
       source: 'supabase',
-      risiko: {
-        labels: ['0h', '6h', '12h', '18h', '24h', '30h', '36h', '42h'],
-        data: projData,
-        current: currentInteg,
-        status:
-          currentInteg >= 80
-            ? 'Risiko rendah'
-            : currentInteg >= 50
-              ? 'Risiko rendah'
-              : 'Risiko tinggi',
-      },
       volume: {
         labels: pts.map((p) => hhmm(p.timestamp)),
         data: pts.map((p) => volPct(p.capacitance_raw)),

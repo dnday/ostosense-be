@@ -22,7 +22,19 @@ export class MqttService implements OnModuleInit {
     const topic = process.env.MQTT_TOPIC || 'ostosense/sensor_data';
     this.logger.log(`Menghubungkan ke MQTT Broker (${mqttUrl})...`);
 
-    this.mqttClient = mqtt.connect(mqttUrl);
+    // ponytail: ini cuma kesiapan sisi-client (kredensial + TLS via mqtts://
+    // kalau MQTT_URL memakainya) — enkripsi/autentikasi yang beneran baru
+    // aktif kalau broker-nya dikonfigurasi TLS+auth juga (infra di luar repo
+    // ini). Selama MQTT_URL masih mqtt:// polos ke broker publik, transportnya
+    // TETAP tidak terenkripsi; kredensial di bawah opsional dan diabaikan
+    // kalau tidak di-set.
+    const mqttUsername = process.env.MQTT_USERNAME;
+    const mqttPassword = process.env.MQTT_PASSWORD;
+    this.mqttClient = mqtt.connect(mqttUrl, {
+      ...(mqttUsername ? { username: mqttUsername } : {}),
+      ...(mqttPassword ? { password: mqttPassword } : {}),
+      rejectUnauthorized: process.env.MQTT_TLS_INSECURE !== 'true',
+    });
 
     // mqtt.js crashes the process on an unhandled 'error' event — always listen.
     this.mqttClient.on('error', (err) => {
