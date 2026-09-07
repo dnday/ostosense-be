@@ -91,20 +91,33 @@ export class MqttService implements OnModuleInit {
         // Ubah teks JSON menjadi Object
         const payload = JSON.parse(payloadStr);
 
-        // Tolak payload cacat sebelum masuk DB — kalau lolos, angka NaN
-        // ini nyasar ke grafik risiko/volume di dashboard.
-        if (
-          typeof payload.capacitance_raw !== 'number' ||
-          typeof payload.lig_raw !== 'number'
-        ) {
+        // Hardware asli punya 5 channel (2 resistif + 3 kapasitif) — lihat
+        // OSTOSENSE-AI/docs/real-pilot-data-audit-v0.1.md. Kap_7 dikunci sebagai
+        // kanal kapasitif utama, Res_15 sebagai kanal LIG utama; capacitance_raw/
+        // lig_raw diturunkan dari situ demi kompatibilitas mundur dengan app yang
+        // sudah ada (belum diubah buat baca 5 channel langsung).
+        const hasChannels =
+          typeof payload.kap_7_raw === 'number' && typeof payload.res_15_raw === 'number';
+        const hasLegacy =
+          typeof payload.capacitance_raw === 'number' && typeof payload.lig_raw === 'number';
+
+        if (!hasChannels && !hasLegacy) {
           this.logger.error(`Payload MQTT tidak valid, dilewati: ${payloadStr}`);
           return;
         }
 
+        const row = hasChannels
+          ? {
+              ...payload,
+              capacitance_raw: payload.kap_7_raw,
+              lig_raw: payload.res_15_raw,
+            }
+          : payload;
+
         // 4. Masukkan data ke tabel sensor_logs di Supabase
         const { error } = await this.supabase
           .from('sensor_logs')
-          .insert([payload]);
+          .insert([row]);
 
         if (error) {
           this.logger.error('Gagal menyimpan ke Supabase:', error.message);
@@ -112,8 +125,8 @@ export class MqttService implements OnModuleInit {
           this.logger.log('✅ Data ESP32 via MQTT berhasil disimpan ke database!');
         }
 
-        if (typeof payload.session_id === 'string') {
-          await this.checkThresholdsAndAlert(payload.session_id, payload.capacitance_raw, payload.lig_raw);
+        if (typeof row.session_id === 'string') {
+          await this.checkThresholdsAndAlert(row.session_id, row.capacitance_raw, row.lig_raw);
         }
       } catch (error) {
         this.logger.error('Error saat memproses pesan MQTT:', error.message);
