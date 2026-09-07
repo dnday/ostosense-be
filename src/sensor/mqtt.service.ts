@@ -93,11 +93,14 @@ export class MqttService implements OnModuleInit {
 
         // Hardware asli punya 5 channel (2 resistif + 3 kapasitif) — lihat
         // OSTOSENSE-AI/docs/real-pilot-data-audit-v0.1.md. Kap_7 dikunci sebagai
-        // kanal kapasitif utama, Res_15 sebagai kanal LIG utama; capacitance_raw/
-        // lig_raw diturunkan dari situ demi kompatibilitas mundur dengan app yang
-        // sudah ada (belum diubah buat baca 5 channel langsung).
+        // kanal kapasitif utama; kedua kanal resistif (Res_15+Res_16, dua titik
+        // elektroda LIG) dirata-rata jadi satu nilai LIG lebih tahan noise.
+        // capacitance_raw/lig_raw diturunkan dari situ demi kompatibilitas mundur
+        // dengan app yang sudah ada (belum diubah buat baca 5 channel langsung).
         const hasChannels =
-          typeof payload.kap_7_raw === 'number' && typeof payload.res_15_raw === 'number';
+          typeof payload.kap_7_raw === 'number' &&
+          typeof payload.res_15_raw === 'number' &&
+          typeof payload.res_16_raw === 'number';
         const hasLegacy =
           typeof payload.capacitance_raw === 'number' && typeof payload.lig_raw === 'number';
 
@@ -110,7 +113,7 @@ export class MqttService implements OnModuleInit {
           ? {
               ...payload,
               capacitance_raw: payload.kap_7_raw,
-              lig_raw: payload.res_15_raw,
+              lig_raw: (payload.res_15_raw + payload.res_16_raw) / 2,
             }
           : payload;
 
