@@ -29,6 +29,9 @@ const clamp = (v: number) => Math.max(0, Math.min(100, Math.round(v)));
 // notifikasi pasien sampai ada model tervalidasi).
 const VOLUME_FULL_THRESHOLD = 80;
 const LIG_CONTACT_THRESHOLD = 20;
+// ponytail: angka tetap, belum ada tuning berbasis data lebih lanjut — naikkan kalau
+// masih ada false-positive, turunkan kalau alert kerasa telat.
+const LIG_ALERT_WINDOW = 5;
 
 @Injectable()
 export class MqttService implements OnModuleInit {
@@ -138,9 +141,24 @@ export class MqttService implements OnModuleInit {
     this.logger.log('✅ Data sensor berhasil disimpan ke database!');
 
     if (typeof row.session_id === 'string') {
-      await this.checkThresholdsAndAlert(row.session_id, row.capacitance_raw, row.lig_raw);
+      await this.checkThresholdsAndAlert(row.session_id, row.capacitance_raw);
     }
     return { ok: true };
+  }
+
+  // Sampel LIG mentah sangat berisik — data pilot nunjukin lompatan 1 -> 1194 -> 3
+  // antar sample berturut-turut padahal capacitance_raw di sensor yang sama flat.
+  // Rata-ratakan LIG_ALERT_WINDOW sample terakhir sebelum dibandingkan ke ambang,
+  // biar satu spike noise gak langsung ngirim push notif "kontak cairan" palsu.
+  private async avgRecentLig(sessionId: string): Promise<number | null> {
+    const { data } = await this.supabase
+      .from('sensor_logs')
+      .select('lig_raw')
+      .eq('session_id', sessionId)
+      .order('timestamp', { ascending: false })
+      .limit(LIG_ALERT_WINDOW);
+    if (!data || data.length === 0) return null;
+    return data.reduce((sum, r) => sum + (r.lig_raw ?? 0), 0) / data.length;
   }
 
   private async refreshCalibration() {
@@ -152,10 +170,12 @@ export class MqttService implements OnModuleInit {
     if (data) this.calibration = { ...DEFAULT_CALIBRATION, ...data };
   }
 
-  private async checkThresholdsAndAlert(sessionId: string, capacitanceRaw: number, ligRaw: number) {
+  private async checkThresholdsAndAlert(sessionId: string, capacitanceRaw: number) {
     const { cap_empty, cap_full, lig_base, lig_dead } = this.calibration;
     const volumePct = clamp(((capacitanceRaw - cap_empty) / (cap_full - cap_empty)) * 100);
-    const integPct = clamp(((ligRaw - lig_dead) / (lig_base - lig_dead)) * 100);
+
+    const avgLig = await this.avgRecentLig(sessionId);
+    const integPct = avgLig === null ? null : clamp(((avgLig - lig_dead) / (lig_base - lig_dead)) * 100);
 
     const prev = this.alertState.get(sessionId) ?? { volume: false, ligContact: false };
     const next = { ...prev };
@@ -168,11 +188,13 @@ export class MqttService implements OnModuleInit {
       next.volume = false;
     }
 
-    if (integPct <= LIG_CONTACT_THRESHOLD && !prev.ligContact) {
-      next.ligContact = true;
-      await this.sendAlert(sessionId, 'Kontak cairan terdeteksi', 'Sensor LIG mendeteksi kontak cairan langsung di baseplate.');
-    } else if (integPct > LIG_CONTACT_THRESHOLD) {
-      next.ligContact = false;
+    if (integPct !== null) {
+      if (integPct <= LIG_CONTACT_THRESHOLD && !prev.ligContact) {
+        next.ligContact = true;
+        await this.sendAlert(sessionId, 'Kontak cairan terdeteksi', 'Sensor LIG mendeteksi kontak cairan langsung di baseplate.');
+      } else if (integPct > LIG_CONTACT_THRESHOLD) {
+        next.ligContact = false;
+      }
     }
 
     this.alertState.set(sessionId, next);

@@ -30,6 +30,7 @@ const DEFAULT_CALIBRATION: Calibration = {
 // ponytail: belum ada kolom kalibrasi khusus buat ambang integritas kulit di
 // sensor_calibration — hardcode di sini sampai ada kebutuhan diedit dari Settings.
 const SKIN_INTEGRITY_WARNING_BELOW = 50;
+const LIG_SMOOTH_WINDOW = 5;
 
 const clamp = (v: number) => Math.max(0, Math.min(100, Math.round(v)));
 
@@ -131,7 +132,12 @@ export class SensorService {
 
     const last = logs[logs.length - 1];
     const currentVol = volPct(last.capacitance_raw);
-    const currentInteg = integPct(last.lig_raw);
+    // lig_raw sample-per-sample sangat berisik (data pilot: lompat 1 -> 1194 -> 3
+    // antar sample berturut-turut) — rata-ratakan beberapa sample terakhir biar
+    // angka "current" gak kelap-kelip, bukan dari satu bacaan mentah.
+    const recentLig = logs.slice(-LIG_SMOOTH_WINDOW);
+    const avgLig = recentLig.reduce((sum, l) => sum + l.lig_raw, 0) / recentLig.length;
+    const currentInteg = integPct(avgLig);
 
     const history = pts
       .slice()
