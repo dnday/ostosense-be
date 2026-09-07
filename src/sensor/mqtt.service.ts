@@ -87,54 +87,55 @@ export class MqttService implements OnModuleInit {
       try {
         const payloadStr = message.toString();
         this.logger.log(`Data masuk dari [${topic}]: ${payloadStr}`);
-
-        // Ubah teks JSON menjadi Object
-        const payload = JSON.parse(payloadStr);
-
-        // Hardware asli punya 5 channel (2 resistif + 3 kapasitif) — lihat
-        // OSTOSENSE-AI/docs/real-pilot-data-audit-v0.1.md. Kap_7 dikunci sebagai
-        // kanal kapasitif utama; kedua kanal resistif (Res_15+Res_16, dua titik
-        // elektroda LIG) dirata-rata jadi satu nilai LIG lebih tahan noise.
-        // capacitance_raw/lig_raw diturunkan dari situ demi kompatibilitas mundur
-        // dengan app yang sudah ada (belum diubah buat baca 5 channel langsung).
-        const hasChannels =
-          typeof payload.kap_7_raw === 'number' &&
-          typeof payload.res_15_raw === 'number' &&
-          typeof payload.res_16_raw === 'number';
-        const hasLegacy =
-          typeof payload.capacitance_raw === 'number' && typeof payload.lig_raw === 'number';
-
-        if (!hasChannels && !hasLegacy) {
-          this.logger.error(`Payload MQTT tidak valid, dilewati: ${payloadStr}`);
-          return;
-        }
-
-        const row = hasChannels
-          ? {
-              ...payload,
-              capacitance_raw: payload.kap_7_raw,
-              lig_raw: (payload.res_15_raw + payload.res_16_raw) / 2,
-            }
-          : payload;
-
-        // 4. Masukkan data ke tabel sensor_logs di Supabase
-        const { error } = await this.supabase
-          .from('sensor_logs')
-          .insert([row]);
-
-        if (error) {
-          this.logger.error('Gagal menyimpan ke Supabase:', error.message);
-        } else {
-          this.logger.log('✅ Data ESP32 via MQTT berhasil disimpan ke database!');
-        }
-
-        if (typeof row.session_id === 'string') {
-          await this.checkThresholdsAndAlert(row.session_id, row.capacitance_raw, row.lig_raw);
-        }
+        const result = await this.ingestPayload(JSON.parse(payloadStr));
+        if (!result.ok) this.logger.error(`Payload MQTT tidak valid, dilewati: ${payloadStr}`);
       } catch (error) {
         this.logger.error('Error saat memproses pesan MQTT:', error.message);
       }
     });
+  }
+
+  // Dipakai baik oleh handler MQTT di atas maupun endpoint HTTP di
+  // SensorController — device yang gak bisa/gak mau pakai MQTT (mis. di
+  // jaringan yang beda dari broker) bisa kirim payload yang sama persis
+  // lewat HTTP POST.
+  async ingestPayload(payload: any): Promise<{ ok: boolean; error?: string }> {
+    // Hardware asli punya 5 channel (2 resistif + 3 kapasitif) — lihat
+    // OSTOSENSE-AI/docs/real-pilot-data-audit-v0.1.md. Kap_7 dikunci sebagai
+    // kanal kapasitif utama; kedua kanal resistif (Res_15+Res_16, dua titik
+    // elektroda LIG) dirata-rata jadi satu nilai LIG lebih tahan noise.
+    // capacitance_raw/lig_raw diturunkan dari situ demi kompatibilitas mundur
+    // dengan app yang sudah ada (belum diubah buat baca 5 channel langsung).
+    const hasChannels =
+      typeof payload.kap_7_raw === 'number' &&
+      typeof payload.res_15_raw === 'number' &&
+      typeof payload.res_16_raw === 'number';
+    const hasLegacy =
+      typeof payload.capacitance_raw === 'number' && typeof payload.lig_raw === 'number';
+
+    if (!hasChannels && !hasLegacy) {
+      return { ok: false, error: 'Payload tidak valid: butuh kap_7_raw/res_15_raw/res_16_raw atau capacitance_raw/lig_raw' };
+    }
+
+    const row = hasChannels
+      ? {
+          ...payload,
+          capacitance_raw: payload.kap_7_raw,
+          lig_raw: (payload.res_15_raw + payload.res_16_raw) / 2,
+        }
+      : payload;
+
+    const { error } = await this.supabase.from('sensor_logs').insert([row]);
+    if (error) {
+      this.logger.error('Gagal menyimpan ke Supabase:', error.message);
+      return { ok: false, error: error.message };
+    }
+    this.logger.log('✅ Data sensor berhasil disimpan ke database!');
+
+    if (typeof row.session_id === 'string') {
+      await this.checkThresholdsAndAlert(row.session_id, row.capacitance_raw, row.lig_raw);
+    }
+    return { ok: true };
   }
 
   private async refreshCalibration() {
