@@ -5,33 +5,22 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 type Calibration = {
   cap_empty: number;
   cap_full: number;
-  lig_base: number;
-  lig_dead: number;
 };
 
-// Diturunkan dari data kalibrasi asli (P001-P007 + sesi OSTOSENSE_*). cap_empty/
-// cap_full dari median Kap_7 kondisi kering (P001) vs kantong penuh (P007,
-// dipangkas dari noise). lig_base/lig_dead dari rata-rata Res_15+Res_16: kontak
-// cairan bikin nilai NAIK (kebalik dari asumsi simulator lama), jadi lig_base
-// < lig_dead di sini.
+// Diturunkan dari data kalibrasi asli (P001-P007 + sesi OSTOSENSE_*): median
+// Kap_7 kondisi kering (P001) vs kantong penuh (P007, dipangkas dari noise).
 const DEFAULT_CALIBRATION: Calibration = {
   cap_empty: 30000,
   cap_full: 250000,
-  lig_base: 10,
-  lig_dead: 1470,
 };
 
 const clamp = (v: number) => Math.max(0, Math.min(100, Math.round(v)));
 
-// Bukan kelas AI — ini alert langsung dari nilai sensor mentah (kantong penuh,
-// kontak cairan LIG), yang menurut kontrak integrasi AI v0.2 memang dipisah dan
-// boleh punya jalur notifikasi sendiri (beda dari kelas AI yang dilarang memicu
-// notifikasi pasien sampai ada model tervalidasi).
+// Bukan kelas AI — ini alert langsung dari nilai sensor mentah (kantong penuh),
+// yang menurut kontrak integrasi AI v0.2 memang dipisah dan boleh punya jalur
+// notifikasi sendiri (beda dari kelas AI yang dilarang memicu notifikasi
+// pasien sampai ada model tervalidasi).
 const VOLUME_FULL_THRESHOLD = 80;
-const LIG_CONTACT_THRESHOLD = 20;
-// ponytail: angka tetap, belum ada tuning berbasis data lebih lanjut — naikkan kalau
-// masih ada false-positive, turunkan kalau alert kerasa telat.
-const LIG_ALERT_WINDOW = 5;
 
 @Injectable()
 export class MqttService implements OnModuleInit {
@@ -41,7 +30,7 @@ export class MqttService implements OnModuleInit {
   private calibration: Calibration = DEFAULT_CALIBRATION;
   // ponytail: state alert per sesi disimpan di memori, reset kalau backend restart —
   // upgrade ke tabel/persisted state kalau butuh dedup yang lebih tahan lama.
-  private alertState = new Map<string, { volume: boolean; ligContact: boolean }>();
+  private alertState = new Map<string, { volume: boolean }>();
 
   constructor() {
     // Membaca kredensial Supabase dari environment
@@ -146,38 +135,20 @@ export class MqttService implements OnModuleInit {
     return { ok: true };
   }
 
-  // Sampel LIG mentah sangat berisik — data pilot nunjukin lompatan 1 -> 1194 -> 3
-  // antar sample berturut-turut padahal capacitance_raw di sensor yang sama flat.
-  // Rata-ratakan LIG_ALERT_WINDOW sample terakhir sebelum dibandingkan ke ambang,
-  // biar satu spike noise gak langsung ngirim push notif "kontak cairan" palsu.
-  private async avgRecentLig(sessionId: string): Promise<number | null> {
-    const { data } = await this.supabase
-      .from('sensor_logs')
-      .select('lig_raw')
-      .eq('session_id', sessionId)
-      .order('timestamp', { ascending: false })
-      .limit(LIG_ALERT_WINDOW);
-    if (!data || data.length === 0) return null;
-    return data.reduce((sum, r) => sum + (r.lig_raw ?? 0), 0) / data.length;
-  }
-
   private async refreshCalibration() {
     const { data } = await this.supabase
       .from('sensor_calibration')
-      .select('cap_empty, cap_full, lig_base, lig_dead')
+      .select('cap_empty, cap_full')
       .eq('id', 'default')
       .maybeSingle();
     if (data) this.calibration = { ...DEFAULT_CALIBRATION, ...data };
   }
 
   private async checkThresholdsAndAlert(sessionId: string, capacitanceRaw: number) {
-    const { cap_empty, cap_full, lig_base, lig_dead } = this.calibration;
+    const { cap_empty, cap_full } = this.calibration;
     const volumePct = clamp(((capacitanceRaw - cap_empty) / (cap_full - cap_empty)) * 100);
 
-    const avgLig = await this.avgRecentLig(sessionId);
-    const integPct = avgLig === null ? null : clamp(((avgLig - lig_dead) / (lig_base - lig_dead)) * 100);
-
-    const prev = this.alertState.get(sessionId) ?? { volume: false, ligContact: false };
+    const prev = this.alertState.get(sessionId) ?? { volume: false };
     const next = { ...prev };
 
     // Cuma kirim pas transisi false->true, biar gak spam tiap pembacaan sensor.
@@ -186,15 +157,6 @@ export class MqttService implements OnModuleInit {
       await this.sendAlert(sessionId, 'Kantong hampir penuh', `Volume kantong sudah ${volumePct}% — segera ganti.`);
     } else if (volumePct < VOLUME_FULL_THRESHOLD) {
       next.volume = false;
-    }
-
-    if (integPct !== null) {
-      if (integPct <= LIG_CONTACT_THRESHOLD && !prev.ligContact) {
-        next.ligContact = true;
-        await this.sendAlert(sessionId, 'Kontak cairan terdeteksi', 'Sensor LIG mendeteksi kontak cairan langsung di baseplate.');
-      } else if (integPct > LIG_CONTACT_THRESHOLD) {
-        next.ligContact = false;
-      }
     }
 
     this.alertState.set(sessionId, next);
