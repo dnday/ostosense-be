@@ -16,11 +16,20 @@ const DEFAULT_CALIBRATION: Calibration = {
 
 const clamp = (v: number) => Math.max(0, Math.min(100, Math.round(v)));
 
-// Bukan kelas AI — ini alert langsung dari nilai sensor mentah (kantong penuh),
-// yang menurut kontrak integrasi AI v0.2 memang dipisah dan boleh punya jalur
-// notifikasi sendiri (beda dari kelas AI yang dilarang memicu notifikasi
-// pasien sampai ada model tervalidasi).
+// Bukan kelas AI — ini alert langsung dari nilai sensor mentah (kantong penuh,
+// kontak cairan LIG), yang menurut kontrak integrasi AI v0.2 memang dipisah dan
+// boleh punya jalur notifikasi sendiri (beda dari kelas AI yang dilarang memicu
+// notifikasi pasien sampai ada model tervalidasi).
 const VOLUME_FULL_THRESHOLD = 80;
+
+// Res_15 (elektroda DALAM baseplate) dan Res_16 (elektroda LUAR baseplate) itu
+// dua sensor dengan makna fisik berbeda, bukan duplikat buat dirata-ratakan:
+// Res_15 = failsafe/deteksi dini (cairan baru menyentuh sisi dalam), Res_16 =
+// kebocoran yang sudah hampir/sedang menembus keluar baseplate. Threshold-nya
+// masih sama (diturunkan dari rata-rata Res_15+Res_16 di data pilot P001-P007,
+// sensor fisiknya identik cuma beda posisi) — belum ada data pilot yang
+// mengkalibrasi tiap posisi secara terpisah.
+const RES_LEAK_THRESHOLD = 1470;
 
 @Injectable()
 export class MqttService implements OnModuleInit {
@@ -30,7 +39,7 @@ export class MqttService implements OnModuleInit {
   private calibration: Calibration = DEFAULT_CALIBRATION;
   // ponytail: state alert per sesi disimpan di memori, reset kalau backend restart —
   // upgrade ke tabel/persisted state kalau butuh dedup yang lebih tahan lama.
-  private alertState = new Map<string, { volume: boolean }>();
+  private alertState = new Map<string, { volume: boolean; failsafe: boolean; leak: boolean }>();
 
   constructor() {
     // Membaca kredensial Supabase dari environment
@@ -130,7 +139,12 @@ export class MqttService implements OnModuleInit {
     this.logger.log('✅ Data sensor berhasil disimpan ke database!');
 
     if (typeof row.session_id === 'string') {
-      await this.checkThresholdsAndAlert(row.session_id, row.capacitance_raw);
+      await this.checkThresholdsAndAlert(
+        row.session_id,
+        row.capacitance_raw,
+        payload.res_15_raw,
+        payload.res_16_raw,
+      );
     }
     return { ok: true };
   }
@@ -144,11 +158,16 @@ export class MqttService implements OnModuleInit {
     if (data) this.calibration = { ...DEFAULT_CALIBRATION, ...data };
   }
 
-  private async checkThresholdsAndAlert(sessionId: string, capacitanceRaw: number) {
+  private async checkThresholdsAndAlert(
+    sessionId: string,
+    capacitanceRaw: number,
+    res15Raw?: number,
+    res16Raw?: number,
+  ) {
     const { cap_empty, cap_full } = this.calibration;
     const volumePct = clamp(((capacitanceRaw - cap_empty) / (cap_full - cap_empty)) * 100);
 
-    const prev = this.alertState.get(sessionId) ?? { volume: false };
+    const prev = this.alertState.get(sessionId) ?? { volume: false, failsafe: false, leak: false };
     const next = { ...prev };
 
     // Cuma kirim pas transisi false->true, biar gak spam tiap pembacaan sensor.
@@ -157,6 +176,27 @@ export class MqttService implements OnModuleInit {
       await this.sendAlert(sessionId, 'Kantong hampir penuh', `Volume kantong sudah ${volumePct}% — segera ganti.`);
     } else if (volumePct < VOLUME_FULL_THRESHOLD) {
       next.volume = false;
+    }
+
+    // Res_15 = elektroda dalam baseplate (failsafe/deteksi dini), Res_16 = elektroda
+    // luar baseplate (kebocoran hampir/sedang menembus keluar) — dua sinyal terpisah,
+    // Res_16 lebih urgent karena posisinya lebih dekat ke luar.
+    if (typeof res15Raw === 'number') {
+      if (res15Raw >= RES_LEAK_THRESHOLD && !prev.failsafe) {
+        next.failsafe = true;
+        await this.sendAlert(sessionId, 'Terdeteksi cairan di dalam baseplate', 'Sensor failsafe (dalam) mendeteksi kontak cairan — periksa kondisi baseplate.');
+      } else if (res15Raw < RES_LEAK_THRESHOLD) {
+        next.failsafe = false;
+      }
+    }
+
+    if (typeof res16Raw === 'number') {
+      if (res16Raw >= RES_LEAK_THRESHOLD && !prev.leak) {
+        next.leak = true;
+        await this.sendAlert(sessionId, 'Peringatan kebocoran', 'Sensor luar baseplate mendeteksi cairan hampir/sedang menembus keluar — segera periksa/ganti.');
+      } else if (res16Raw < RES_LEAK_THRESHOLD) {
+        next.leak = false;
+      }
     }
 
     this.alertState.set(sessionId, next);
